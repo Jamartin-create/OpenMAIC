@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   settings: vi.fn(),
   mediaPut: vi.fn(),
   mediaDelete: vi.fn(),
+  mediaGet: vi.fn(),
   putAsset: vi.fn(),
   removeAsset: vi.fn(),
   mutateDocument: vi.fn(),
@@ -29,7 +30,9 @@ vi.mock('@/lib/store/settings', () => ({
 
 vi.mock('@/lib/utils/database', () => ({
   mediaFileKey: (stageId: string, ref: string) => `${stageId}:${ref}`,
-  db: { mediaFiles: { put: mocks.mediaPut, delete: mocks.mediaDelete } },
+  db: {
+    mediaFiles: { put: mocks.mediaPut, delete: mocks.mediaDelete, get: mocks.mediaGet },
+  },
 }));
 
 vi.mock('@/lib/media/asset-pool', () => ({
@@ -108,6 +111,7 @@ describe('media that finishes before its scene exists', () => {
     clearPendingMediaAllocations();
     mocks.mediaPut.mockReset().mockResolvedValue(undefined);
     mocks.mediaDelete.mockReset().mockResolvedValue(undefined);
+    mocks.mediaGet.mockReset().mockResolvedValue(undefined);
     mocks.putAsset.mockReset().mockResolvedValue('ast_first');
     mocks.removeAsset.mockReset().mockResolvedValue(undefined);
     // No document yet: the funnel finds nothing to rewrite, exactly as it does
@@ -289,16 +293,19 @@ describe('media that finishes before its scene exists', () => {
   });
 
   // The record outlives the parked queue, so a record left behind after a
-  // reclaim would let the write boundary stamp an id whose bytes are gone —
+  // failed commit would let the write boundary stamp an id nothing wrote —
   // and the placeholder it replaced would be gone with it, which reads as
   // "already generated" and stops anything from retrying.
-  it('forgets an allocation whose bytes it reclaimed, so the placeholder survives', async () => {
+  it('forgets an allocation whose commit reached nothing, so the placeholder survives', async () => {
     // Nothing was ever written, and no slide exists, so the commit reclaims.
     mocks.mutateDocument.mockRejectedValue(new Error('document lock unavailable'));
     useStageStore.setState({ scenes: [] });
 
     await generateMediaForOutlines([outline()], stageId);
-    expect(mocks.removeAsset).toHaveBeenCalledWith('ast_first');
+    // The bytes are NOT deleted — a browser may not mutate the shared asset
+    // partition — but the record goes, so nothing can stamp an id the document
+    // has no reason to trust.
+    expect(mocks.removeAsset).not.toHaveBeenCalled();
 
     // The slide arrives afterwards and is committed, then saved.
     const scene = sceneWithImage(imageRef);

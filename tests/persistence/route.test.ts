@@ -325,9 +325,10 @@ describe('embedded persistence route', () => {
     expect(removed.status).toBe(403);
     expect(entries.has(id)).toBe(true);
 
-    // In this build there is no way to hold the credential at all, so the
-    // deployment's own token does not help either — mutations are simply
-    // unavailable, which is what they were before assets worked.
+    // Holding the deployment's credential does not help. Every caller resolves
+    // to the same shared asset principal, so authentication decides nothing
+    // about whose media this is — and the registry is the only copy a course
+    // has.
     const tokenPut = await call(
       new Request(`http://localhost/api/persistence/assets/${id}/content`, {
         method: 'PUT',
@@ -339,9 +340,9 @@ describe('embedded persistence route', () => {
     expect(entries.has(id)).toBe(true);
   });
 
-  // Where the operator has opted into the development authenticator, the
-  // credential it defines is what separates a mutation from a read.
-  it('performs asset mutations for a caller holding the deployment credential', async () => {
+  // Not even where the operator has opted into the development authenticator:
+  // that credential is shared too, so it cannot say whose asset this is.
+  it('refuses asset mutations even with the development authenticator enabled', async () => {
     interface Entry {
       bytes: Uint8Array;
       mime: string;
@@ -438,7 +439,6 @@ describe('embedded persistence route', () => {
     );
     const { id } = (await allocated.json()) as { id: string };
 
-    // Still refused without the credential, even here.
     const anonymous = await call(
       new Request(`http://localhost/api/persistence/assets/${id}`, { method: 'DELETE' }),
     );
@@ -452,8 +452,8 @@ describe('embedded persistence route', () => {
         headers: credential,
       }),
     );
-    expect(put.status).toBe(204);
-    expect(entries.get(id)?.revision).toBe(2);
+    expect(put.status).toBe(403);
+    expect(entries.get(id)?.revision).toBe(1);
 
     const removed = await call(
       new Request(`http://localhost/api/persistence/assets/${id}`, {
@@ -461,8 +461,12 @@ describe('embedded persistence route', () => {
         headers: credential,
       }),
     );
-    expect(removed.status).toBe(204);
-    expect(entries.has(id)).toBe(false);
+    expect(removed.status).toBe(403);
+    expect(entries.has(id)).toBe(true);
+
+    // Reads and allocations are unaffected by the refusal.
+    const read = await call(new Request(`http://localhost/api/persistence/assets/${id}/content`));
+    expect(read.status).toBe(200);
   });
 
   it('mounts an asset store on the document pool and transaction and ensures its schema', async () => {
@@ -571,6 +575,11 @@ describe('embedded persistence route', () => {
     ).toBe(transaction);
     expect((assetConstructions[0]?.options as { withTransaction?: unknown }).withTransaction).toBe(
       transaction,
+    );
+    // Allocation is open to every caller this deployment admits, and they all
+    // share one asset principal, so the store's own quota is the only ceiling.
+    expect((assetConstructions[0]?.options as { quotaBytes?: unknown }).quotaBytes).toBe(
+      10 * 1024 * 1024 * 1024,
     );
     expect((handlerOptions[0] as { assetStore?: unknown }).assetStore).toBe(
       assetConstructions[0]?.instance,

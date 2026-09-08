@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   serverBacked: vi.fn(),
   settings: vi.fn(),
   mediaDelete: vi.fn(),
+  mediaGet: vi.fn(),
 }));
 
 vi.mock('@/lib/persistence/media-persistence', () => ({
@@ -22,7 +23,7 @@ vi.mock('@/lib/store/settings', () => ({
 
 vi.mock('@/lib/utils/database', () => ({
   mediaFileKey: (stageId: string, ref: string) => `${stageId}:${ref}`,
-  db: { mediaFiles: { put: vi.fn(), delete: mocks.mediaDelete } },
+  db: { mediaFiles: { put: vi.fn(), delete: mocks.mediaDelete, get: mocks.mediaGet } },
 }));
 
 import {
@@ -98,6 +99,7 @@ describe('retryMediaTask honours the same permission', () => {
     resetGenerationPermissionsForTests();
     mocks.serverBacked.mockReset().mockReturnValue(true);
     mocks.mediaDelete.mockReset().mockResolvedValue(undefined);
+    mocks.mediaGet.mockReset().mockResolvedValue(undefined);
     mocks.settings.mockReset().mockReturnValue({
       imageGenerationEnabled: true,
       videoGenerationEnabled: true,

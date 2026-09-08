@@ -12,6 +12,7 @@ import { useStageStore } from '@/lib/store/stage';
 import { proveExclusiveAssetOwnership } from '@/lib/media/collect-stage-asset-refs';
 import { resolveAudioBlob } from '@/lib/media/resolve-audio-bytes';
 import { assetRefExists } from '@/lib/media/use-asset-url';
+import { mayNameAPoolAsset } from '@/lib/media/media-placeholder';
 import { mayGenerateForStage } from '@/lib/classroom/generation-permission';
 
 /** Legacy deterministic Dexie key used before pool allocation. */
@@ -98,6 +99,9 @@ async function exclusivelyOwnedAudioId(
   stageId: string | undefined,
 ): Promise<string | undefined> {
   if (!audioId || !stageId) return undefined;
+  // A derived key was never allocated, so probing the pool for it is a
+  // guaranteed miss — and a real request once the pool is server-backed.
+  if (!mayNameAPoolAsset(audioId)) return undefined;
   if (!(await assetRefExists(audioId))) return undefined;
   const { exclusive } = await proveExclusiveAssetOwnership(audioId, stageId);
   return exclusive ? audioId : undefined;

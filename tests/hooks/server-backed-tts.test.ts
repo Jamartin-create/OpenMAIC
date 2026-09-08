@@ -195,13 +195,17 @@ describe('server-backed narration storage', () => {
     expect(actions[0].audioId).toBeUndefined();
   });
 
-  it('reclaims pool bytes when a scene rolls its fresh narration back', async () => {
+  // A browser may not delete from the shared asset partition — allowing it
+  // would let any caller destroy another author's narration — so a rolled-back
+  // clip drops its local copy and leaves an entry nothing references for
+  // server-side reclamation.
+  it('drops only the local copy when a scene rolls its fresh narration back', async () => {
     const { removeFreshTtsAllocations } = await import('@/lib/hooks/use-scene-generator');
 
     await removeFreshTtsAllocations(['ast_one', 'ast_two']);
 
-    expect(mocks.poolRemove.mock.calls.map(([id]) => id)).toEqual(['ast_one', 'ast_two']);
     expect(mocks.audioDelete).toHaveBeenCalledTimes(2);
+    expect(mocks.poolRemove).not.toHaveBeenCalled();
   });
 
   it('leaves the pool untouched when media persistence is browser-only', async () => {

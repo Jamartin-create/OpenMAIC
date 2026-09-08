@@ -51,6 +51,7 @@ import {
   type MediaTaskState,
 } from '@/lib/media/resolve-media-ref';
 import { withAssetUrl } from '@/lib/media/use-asset-url';
+import { mayNameAPoolAsset } from '@/lib/media/media-placeholder';
 import { useSettingsStore } from '@/lib/store/settings';
 import {
   beginStageDeletionCascade,
@@ -886,14 +887,18 @@ export async function resolveThumbnailMediaValue(
   }
   let blob: Blob | undefined;
   try {
-    blob = await withAssetUrl(ref, async (url) => {
-      if (!url) return undefined;
-      const response = await fetch(url);
-      const fetched = response.ok ? await response.blob() : undefined;
-      // Zero-byte pool answers are not usable bytes: fall back to the stored
-      // row (or no thumbnail) rather than minting an empty image.
-      return fetched && fetched.size > 0 ? fetched : undefined;
-    });
+    // A generation placeholder is not a pool id: leasing it is a guaranteed
+    // miss, and a thumbnail grid asks once per slide per load.
+    blob = mayNameAPoolAsset(ref)
+      ? await withAssetUrl(ref, async (url) => {
+          if (!url) return undefined;
+          const response = await fetch(url);
+          const fetched = response.ok ? await response.blob() : undefined;
+          // Zero-byte pool answers are not usable bytes: fall back to the
+          // stored row (or no thumbnail) rather than minting an empty image.
+          return fetched && fetched.size > 0 ? fetched : undefined;
+        })
+      : undefined;
   } catch {
     // Pool access is optional for the home-page compatibility thumbnail.
   }

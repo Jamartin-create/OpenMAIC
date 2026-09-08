@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   settings: vi.fn(),
   mediaPut: vi.fn(),
   mediaDelete: vi.fn(),
+  mediaGet: vi.fn(),
   putAsset: vi.fn(),
   removeAsset: vi.fn(),
   persistReference: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock('@/lib/utils/database', () => ({
     mediaFiles: {
       put: mocks.mediaPut,
       delete: mocks.mediaDelete,
+      get: mocks.mediaGet,
     },
   },
 }));
@@ -133,6 +135,7 @@ describe('server-backed classic media orchestrator', () => {
     resetProxyMediaFailureCache();
     mocks.mediaPut.mockReset().mockResolvedValue(undefined);
     mocks.mediaDelete.mockReset().mockResolvedValue(undefined);
+    mocks.mediaGet.mockReset().mockResolvedValue(undefined);
     mocks.putAsset.mockReset().mockResolvedValue('ast_generated');
     mocks.removeAsset.mockReset().mockResolvedValue(undefined);
     mocks.persistReference.mockReset().mockResolvedValue('written');
@@ -386,7 +389,13 @@ describe('server-backed classic media orchestrator', () => {
     expect(useMediaGenerationStore.getState().tasks).toEqual({});
   });
 
-  it('reclaims the allocation only when the funnel says nothing can hold it', async () => {
+  // A browser may not delete from the shared asset partition: the principal it
+  // would scope to is the same for everyone, so allowing it would let any caller
+  // destroy another author's media. An entry nothing references waits for
+  // server-side reclamation instead — but the RECORD of it must go, or a later
+  // save would stamp an id the document has no reason to trust and the
+  // placeholder it replaced would be gone with it.
+  it('forgets an allocation nothing can hold, without deleting its bytes', async () => {
     serveImage();
     mocks.persistReference.mockRejectedValue(
       new MediaReferenceWriteBackError(new Error('document write rejected'), false),
@@ -394,41 +403,26 @@ describe('server-backed classic media orchestrator', () => {
 
     await runImageGeneration();
 
-    // The registry row would otherwise outlive every reference to it, and the
-    // byte collector only reclaims blobs that no row names.
-    expect(mocks.removeAsset).toHaveBeenCalledWith('ast_generated');
-    // ...and the record goes with the bytes, or a later save would stamp an id
-    // that no longer resolves and the placeholder would be gone with it.
     expect(mocks.forgetAllocation).toHaveBeenCalledWith(stageId, imageRef);
+    expect(mocks.removeAsset).not.toHaveBeenCalled();
   });
 
-  // A refused deletion — the normal case in a deployment that has not opted into
-  // the development authenticator — must cost the task nothing. The refusal is
-  // swallowed by `reclaimAsset`, not by the caller's own catch, so a rejection
-  // that escaped it would surface as the task's error instead of the
-  // write-back's, and the retryable state would be about the wrong failure.
-  it('does not fail the task when the deployment refuses the reclaim', async () => {
+  it('leaves the failed element retryable, with its placeholder intact', async () => {
     serveImage();
     mocks.persistReference.mockRejectedValue(
       new MediaReferenceWriteBackError(new Error('document write rejected'), false),
     );
-    mocks.removeAsset.mockRejectedValue(new Error('403 forbidden'));
 
     await runImageGeneration();
 
-    expect(mocks.removeAsset).toHaveBeenCalledWith('ast_generated');
-    // The task keeps the write-back's own error, not the reclaim's.
+    // The task carries the write-back's own error and no structured code, which
+    // is what draws the Retry affordance.
     expect(useMediaGenerationStore.getState().tasks[imageRef]).toMatchObject({
       status: 'failed',
       error: 'document write rejected',
     });
     expect(useMediaGenerationStore.getState().tasks[imageRef]?.errorCode).toBeUndefined();
-    // Forgotten before the deletion is attempted, so a refusal still leaves the
-    // placeholder intact and the request open.
     expect(mocks.forgetAllocation).toHaveBeenCalledWith(stageId, imageRef);
-    expect(mocks.forgetAllocation.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.removeAsset.mock.invocationCallOrder[0],
-    );
   });
 
   it('keeps an allocation the funnel says it retained', async () => {
@@ -451,6 +445,68 @@ describe('server-backed classic media orchestrator', () => {
     // Re-keying would hide the request from the very lookup that answers it.
     expect(Object.keys(useMediaGenerationStore.getState().tasks)).toEqual([imageRef]);
     expect(useMediaGenerationStore.getState().tasks[imageRef]?.status).toBe('done');
+  });
+
+  // A course generated before this application stored media server-side holds
+  // placeholders in its document and its bytes only in the author's local
+  // tables. Those bytes are paid for; the author's first server-backed load
+  // converts them rather than buying them again.
+  it('adopts locally cached bytes for a pre-existing course, with no provider call', async () => {
+    serveImage();
+    mocks.mediaGet.mockResolvedValue({
+      id: `${stageId}:${imageRef}`,
+      stageId,
+      type: 'image',
+      blob: new Blob(['cached-bytes'], { type: 'image/png' }),
+      mimeType: 'image/png',
+      size: 12,
+      prompt: 'A diagram',
+      params: '{}',
+      createdAt: 0,
+    });
+
+    await runImageGeneration();
+
+    expect(providerCallCount()).toBe(0);
+    const [stored, meta] = mocks.putAsset.mock.calls[0] as [Blob, { contentType: string }];
+    await expect(stored.text()).resolves.toBe('cached-bytes');
+    expect(meta).toEqual({ contentType: 'image/png' });
+    expect(mocks.persistReference).toHaveBeenCalledWith(
+      expect.objectContaining({ stageId, placeholderRef: imageRef, assetId: 'ast_generated' }),
+    );
+    expect(useMediaGenerationStore.getState().tasks.ast_generated?.status).toBe('done');
+  });
+
+  it('generates when the placeholder has no cached bytes', async () => {
+    serveImage();
+    mocks.mediaGet.mockResolvedValue(undefined);
+
+    await runImageGeneration();
+
+    expect(providerCallCount()).toBe(1);
+  });
+
+  it.each([
+    ['an empty blob', { blob: new Blob([]) }],
+    ['a row that records only a hosted URL', { blob: new Blob([]), ossKey: 'https://cdn/x.png' }],
+    ['a persisted failure', { blob: new Blob(['bytes']), error: 'content policy' }],
+  ])('treats %s as no cached bytes', async (_name, overrides) => {
+    serveImage();
+    mocks.mediaGet.mockResolvedValue({
+      id: `${stageId}:${imageRef}`,
+      stageId,
+      type: 'image',
+      mimeType: 'image/png',
+      size: 0,
+      prompt: 'A diagram',
+      params: '{}',
+      createdAt: 0,
+      ...overrides,
+    });
+
+    await runImageGeneration();
+
+    expect(providerCallCount()).toBe(1);
   });
 
   it('hands parked allocations to their slides before deciding what to generate', async () => {

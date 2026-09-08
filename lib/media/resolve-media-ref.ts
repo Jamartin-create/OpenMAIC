@@ -5,6 +5,7 @@ import { useMayGenerateForStage } from '@/lib/classroom/generation-permission';
 import { useMediaStageId } from '@/lib/contexts/media-stage-context';
 import { useAssetUrlLease, type AssetUrlLeaseState } from './use-asset-url';
 import { isGeneratedMediaPlaceholder } from './media-ref';
+import { mayNameAPoolAsset } from './media-placeholder';
 
 export type MediaResolution =
   | { readonly kind: 'url'; readonly url: string; readonly retryable?: boolean }
@@ -103,15 +104,13 @@ export function useResolvedMediaRef(
   task: MediaTaskState | undefined,
   mediaGenerationDisabled = false,
 ): MediaResolution {
-  const lease = useAssetUrlLease(ref && !isConcreteMediaAddress(ref) ? ref : undefined);
+  // A ref this application minted itself was never in the pool, so leasing it
+  // would only ever be a round trip that answers "no".
+  const leasable = ref && !isConcreteMediaAddress(ref) && mayNameAPoolAsset(ref);
+  const lease = useAssetUrlLease(leasable ? ref : undefined);
   const mayGenerate = useMayGenerateForStage(useMediaStageId());
   return withGenerationPermission(
-    resolveMediaRef(
-      ref,
-      task,
-      ref && !isConcreteMediaAddress(ref) ? lease : MISSING_ASSET_LEASE,
-      mediaGenerationDisabled,
-    ),
+    resolveMediaRef(ref, task, leasable ? lease : MISSING_ASSET_LEASE, mediaGenerationDisabled),
     mayGenerate,
   );
 }

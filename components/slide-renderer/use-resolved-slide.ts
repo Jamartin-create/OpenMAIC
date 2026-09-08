@@ -6,6 +6,7 @@ import type { MediaTask } from '@/lib/store/media-generation';
 import { useMediaStageId } from '@/lib/contexts/media-stage-context';
 import { useMayGenerateForStage } from '@/lib/classroom/generation-permission';
 import { useAssetUrlLeases, type AssetUrlLeaseState } from '@/lib/media/use-asset-url';
+import { mayNameAPoolAsset } from '@/lib/media/media-placeholder';
 import { useMediaGenerationStore } from '@/lib/store/media-generation';
 import { useSettingsStore } from '@/lib/store/settings';
 import {
@@ -201,7 +202,9 @@ export function useResolvedSlideMedia(slide: Slide): ResolvedSlideMedia {
     for (const element of slide.elements) {
       if (element.type === 'image') {
         const source = mediaTaskRefForElement(element) ?? element.src;
-        if (source && !isConcreteMediaAddress(source)) values.push(source);
+        if (source && !isConcreteMediaAddress(source) && mayNameAPoolAsset(source)) {
+          values.push(source);
+        }
       }
       if (element.type === 'video') {
         const binding = resolveVideoMediaForElement(
@@ -209,17 +212,31 @@ export function useResolvedSlideMedia(slide: Slide): ResolvedSlideMedia {
           element,
           stageId,
         );
-        if (binding.sourceRef && !isConcreteMediaAddress(binding.sourceRef)) {
+        if (
+          binding.sourceRef &&
+          !isConcreteMediaAddress(binding.sourceRef) &&
+          mayNameAPoolAsset(binding.sourceRef)
+        ) {
           values.push(binding.sourceRef);
         }
-        if (binding.posterRef && !isConcreteMediaAddress(binding.posterRef)) {
+        if (
+          binding.posterRef &&
+          !isConcreteMediaAddress(binding.posterRef) &&
+          mayNameAPoolAsset(binding.posterRef)
+        ) {
           values.push(binding.posterRef);
         }
       }
     }
     const backgroundRef =
       slide.background?.type === 'image' ? slide.background.image?.src : undefined;
-    if (backgroundRef && !isConcreteMediaAddress(backgroundRef)) values.push(backgroundRef);
+    if (
+      backgroundRef &&
+      !isConcreteMediaAddress(backgroundRef) &&
+      mayNameAPoolAsset(backgroundRef)
+    ) {
+      values.push(backgroundRef);
+    }
     return values;
   }, [slide, stageId]);
   const assetLeases = useAssetUrlLeases(refs);

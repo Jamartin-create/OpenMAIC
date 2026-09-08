@@ -106,19 +106,20 @@ async function createPersistenceHandler(
   // opted into that authenticator — the build this project's own
   // server-persistence recipe produces.
   //
-  // Replacing and deleting are not. Those operations scope by principal key
-  // alone, and that key is the same constant for everyone, so an open PUT or
-  // DELETE would let any caller who learned an id — a document read hands out
-  // every id its slides name — overwrite or destroy another author's media.
-  // They therefore require the development authenticator to have actually
-  // authenticated the request, which in a production build without the opt-in
-  // means they are refused outright. Nothing in the app performs an asset PUT,
-  // and its only DELETE is a best-effort reclaim that tolerates refusal.
+  // Replacing and deleting are refused outright — to everyone, authenticated or
+  // not. Those operations scope by principal key alone, and every caller
+  // resolves to the same shared key, so authentication decides nothing here:
+  // any signed-in visitor who learned an id, and a document read hands out
+  // every id its slides name, could overwrite or destroy another author's
+  // media. There is no per-asset ownership to check against yet, and since this
+  // application began storing generated media the registry is the only copy a
+  // course has, so the answer is no mutations at all. Nothing in the app
+  // performs an asset PUT or DELETE; an entry nothing references waits for
+  // server-side reclamation rather than being deleted from the browser.
   //
-  // What this is NOT: a per-caller access control. ACCESS_CODE is the
-  // deployment-level fence, and no per-principal storage quota is configured,
-  // so an admitted caller may allocate without bound. Both are properties of
-  // this development-auth deployment shape, not of the asset contract.
+  // What this is NOT: a per-caller access control. The deployment-level fence
+  // is the access code. Allocation is bounded by the asset store's per-principal
+  // quota, which with one shared principal is a deployment-wide cap.
   //
   // Runtime requests still take their partition key from a client-supplied
   // header, because a runtime session genuinely is per-learner state. Before
@@ -142,11 +143,10 @@ async function createPersistenceHandler(
     },
     authorizeAssets: async (_principal, request) => {
       const method = (request.method ?? 'GET').toUpperCase();
-      if (method !== 'PUT' && method !== 'DELETE') return true;
-      // A mutation must prove it holds the deployment's credential. Without the
-      // development-auth opt-in there is no way to prove it, which is the
-      // refusal this posture wants.
-      return (await authenticatePersistenceRequest(request)) !== undefined;
+      // Reads and allocations for everyone; mutations for nobody, because the
+      // principal they would be scoped to is shared and therefore proves
+      // nothing about who is asking.
+      return method !== 'PUT' && method !== 'DELETE';
     },
     authorizeMerge: async () => false,
     authorizeAdmin: async () => false,

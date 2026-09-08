@@ -28,7 +28,7 @@ import {
 import { resolveTTSModelForVoice } from '@/lib/audio/constants';
 import { useAgentRegistry } from '@/lib/orchestration/registry/store';
 import { generateMediaForOutlines } from '@/lib/media/media-orchestrator';
-import { putAsset, removeAsset } from '@/lib/media/asset-pool';
+import { putAsset } from '@/lib/media/asset-pool';
 import { mayGenerateForStage } from '@/lib/classroom/generation-permission';
 import { isServerBackedMediaPersistence } from '@/lib/persistence/media-persistence';
 import { lazyBoundedMap } from '@/lib/utils/concurrency';
@@ -545,23 +545,18 @@ async function allocatePooledAudio(blob: Blob, duration: number | undefined): Pr
   });
 }
 
+/**
+ * Drop the local copies of narration a scene has rolled back.
+ *
+ * The pool entry is deliberately left alone. Asset deletion is refused to every
+ * browser — the principal it would scope to is shared, so allowing it would let
+ * any caller destroy another author's narration — and a rolled-back clip is
+ * simply an entry nothing references, waiting for server-side reclamation like
+ * any other.
+ */
 export async function removeFreshTtsAllocations(assetIds: readonly string[]): Promise<void> {
-  const serverBacked = isServerBackedMediaPersistence();
   for (const assetId of new Set(assetIds)) {
     await db.audioFiles.delete(assetId).catch(() => undefined);
-    if (!serverBacked) continue;
-    // Only ids this run allocated reach here, so the pool entry is this run's
-    // to drop; a scene whose narration was rolled back must not leave paid-for
-    // bytes behind that nothing will ever reference.
-    //
-    // Best effort, and a refusal is the normal case: a deployment that has not
-    // opted into the development authenticator refuses every asset deletion.
-    // Those bytes then LEAK. The registry entry still names its blob, and the
-    // byte collector reclaims only blobs no entry names, so nothing collects
-    // them; the registry sweep that would is not wired up yet.
-    await removeAsset(assetId).catch((error: unknown) => {
-      log.warn(`Could not reclaim narration ${assetId}; its bytes now leak:`, error);
-    });
   }
 }
 

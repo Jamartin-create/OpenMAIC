@@ -9,6 +9,7 @@ import { Pool } from 'pg';
 
 import { validateAppScene, validateAppStage } from '@/lib/document-store/validators';
 import { lazyAssetByteStore } from '@/lib/persistence/asset-byte-store';
+import { resolveAssetQuotaBytes } from '@/lib/persistence/asset-quota';
 import { ensureOwnerMaterialSchema } from '@/lib/persistence/owner-materials';
 import { ensureStageMetaSchema } from '@/lib/persistence/stage-meta';
 import { APP_RUNTIME_PAYLOAD_VALIDATORS } from '@/lib/runtime/payload-validators';
@@ -47,6 +48,9 @@ async function createServerPersistenceProvider(
     await ensureAssetSchema(queryable);
     const withTransaction = nodePostgresTransaction(queryable);
     const byteStore = lazyAssetByteStore(process.env.ASSET_S3_BUCKET, queryable);
+    // Allocation is reachable by any caller this deployment admits, so the
+    // store's own quota is what keeps it from growing without bound.
+    const quotaBytes = resolveAssetQuotaBytes();
     return {
       pool,
       runtimeStore: new PgRuntimeStore(queryable, {
@@ -58,7 +62,11 @@ async function createServerPersistenceProvider(
         validateScene: validateAppScene,
         validateStage: validateAppStage,
       }),
-      assetStore: new PgAssetStore(queryable, { withTransaction, byteStore }),
+      assetStore: new PgAssetStore(queryable, {
+        withTransaction,
+        byteStore,
+        ...(quotaBytes === undefined ? {} : { quotaBytes }),
+      }),
     };
   } catch (error) {
     await pool.end().catch(() => {});

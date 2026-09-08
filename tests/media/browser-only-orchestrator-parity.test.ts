@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   settings: vi.fn(),
   mediaPut: vi.fn(),
   mediaDelete: vi.fn(),
+  mediaGet: vi.fn(),
   putAsset: vi.fn(),
   removeAsset: vi.fn(),
   serverBacked: vi.fn(),
@@ -67,6 +68,7 @@ describe('browser-only media orchestration is untouched', () => {
     resetProxyMediaFailureCache();
     mocks.mediaPut.mockReset().mockResolvedValue(undefined);
     mocks.mediaDelete.mockReset().mockResolvedValue(undefined);
+    mocks.mediaGet.mockReset().mockResolvedValue(undefined);
     mocks.putAsset.mockReset();
     mocks.removeAsset.mockReset();
     // The whole point: the seam is off.
@@ -115,6 +117,28 @@ describe('browser-only media orchestration is untouched', () => {
     expect(prompts).toEqual(['one']);
     expect(mocks.putAsset).not.toHaveBeenCalled();
     expect(useMediaGenerationStore.getState().tasks.gen_img_1?.status).toBe('done');
+  });
+
+  // Adopting cached bytes is a server-backed conversion. In browser-only mode
+  // the bytes are already where they belong, so the pool is never involved and
+  // an element with no task simply generates, as it always has.
+  it('does not adopt cached bytes, and never reaches the pool', async () => {
+    mocks.mediaGet.mockResolvedValue({
+      id: `${stageId}:gen_img_1`,
+      stageId,
+      type: 'image',
+      blob: new Blob(['cached-bytes'], { type: 'image/png' }),
+      mimeType: 'image/png',
+      size: 12,
+      prompt: 'one',
+      params: '{}',
+      createdAt: 0,
+    });
+
+    await generateMediaForOutlines([outlineWith(1, 'gen_img_1', 'one')], stageId);
+
+    expect(prompts).toEqual(['one']);
+    expect(mocks.putAsset).not.toHaveBeenCalled();
   });
 
   it('skips an already-done element on task status', async () => {
