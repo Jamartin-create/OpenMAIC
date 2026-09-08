@@ -10,7 +10,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import { useSceneGenerator } from '@/lib/hooks/use-scene-generator';
 import { useMediaGenerationStore } from '@/lib/store/media-generation';
-import { adoptCachedNarration } from '@/lib/audio/adopt-cached-narration';
+import { useNarrationAdoption } from '@/lib/audio/use-narration-adoption';
+import { clearNarrationAllocations } from '@/lib/audio/narration-allocations';
 import { clearPendingMediaAllocations } from '@/lib/media/pending-media-allocations';
 import { useWhiteboardHistoryStore } from '@/lib/store/whiteboard-history';
 import { createLogger } from '@/lib/logger';
@@ -55,7 +56,6 @@ export default function ClassroomDetailPage() {
   const mayGenerate = mayStartOwnerGeneration(isServerBackedMediaPersistence(), ownership);
 
   const generationStartedRef = useRef(false);
-  const narrationAdoptedRef = useRef(false);
 
   const { generateRemaining, retrySingleOutline, stop } = useSceneGenerator({
     onComplete: () => {
@@ -145,7 +145,6 @@ export default function ClassroomDetailPage() {
     // before anything it holds may be generated.
     noteStageGenerationOwnership(classroomId, 'unresolved');
     generationStartedRef.current = false;
-    narrationAdoptedRef.current = false;
 
     // Clear previous classroom's media tasks to prevent cross-classroom contamination.
     // Placeholder IDs (gen_img_1, gen_vid_1) are NOT globally unique across stages,
@@ -157,6 +156,7 @@ export default function ClassroomDetailPage() {
     // Classic placeholders are reused across runs of the same course, so a
     // survivor would be handed to a different slide of the next deck.
     clearPendingMediaAllocations(classroomId);
+    clearNarrationAllocations(classroomId);
 
     // Clear whiteboard history to prevent snapshots from a previous course leaking in.
     useWhiteboardHistoryStore.getState().clearHistory();
@@ -171,6 +171,11 @@ export default function ClassroomDetailPage() {
     };
   }, [classroomId, loadClassroom, stop]);
 
+  // Narration written before this application stored media server-side is a
+  // derived key that only this browser can resolve. The owner's browser still
+  // has the bytes, so it converts them once per load, with no provider call.
+  useNarrationAdoption(classroomId, { ready: !loading && !error, mayGenerate });
+
   // Auto-resume generation for pending outlines
   useEffect(() => {
     if (loading || error || generationStartedRef.current) return;
@@ -182,19 +187,6 @@ export default function ClassroomDetailPage() {
 
     const state = useStageStore.getState();
     const { outlines, scenes, stage, generationComplete } = state;
-
-    // Narration written before this application stored media server-side is a
-    // derived key that only this browser can resolve. The owner's browser
-    // still has the bytes, so it converts them once per load — no provider
-    // call, and a course whose narration is already allocated finds nothing to
-    // do. Kept out of the branches below because it is true of a finished deck
-    // and an interrupted one alike, and it is not part of resuming either.
-    if (stage && !narrationAdoptedRef.current) {
-      narrationAdoptedRef.current = true;
-      void adoptCachedNarration(stage.id).catch((err: unknown) => {
-        log.warn('[Classroom] Narration adoption error:', err);
-      });
-    }
 
     // Check if there are pending outlines. A finished deck is frozen for
     // editing: deleting a slide leaves its outline orphaned, but that must not

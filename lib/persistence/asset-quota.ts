@@ -28,8 +28,14 @@ const DEFAULT_ASSET_QUOTA_BYTES = 10 * 1024 * 1024 * 1024;
  * this throws rather than falling back. A warning plus a default is the worst
  * of both: the operator who typed `10GB` gets neither the ceiling they wrote
  * nor a failure they will notice, and the deployment quietly runs on a limit
- * nobody chose. Resolution happens during persistence startup, so the throw
- * surfaces where the misconfiguration can still be fixed.
+ * nobody chose.
+ *
+ * Called from `instrumentation.ts`, which Next runs once per server instance
+ * before it serves anything, so the throw stops the process from starting. That
+ * placement is the point: the persistence provider that consumes the number is
+ * lazy and memoised, so resolving it only there would let a misconfigured
+ * deployment boot, pass its health check, and then fail every persistence
+ * request -- documents and runtime, not only assets -- one at a time.
  */
 export function resolveAssetQuotaBytes(): number | undefined {
   const raw = process.env.ASSET_QUOTA_BYTES?.trim();

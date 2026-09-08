@@ -30,6 +30,8 @@ import {
   pendingMediaAllocation,
   takePendingMediaAllocations,
 } from './pending-media-allocations';
+import { allocatedNarrationReference } from '@/lib/audio/narration-allocations';
+import { rewriteSceneNarrationReference } from '@/lib/audio/persist-narration-reference';
 
 /** Whether any placeholder this scene carries has bytes waiting for it. */
 export function sceneHasPendingMediaAllocation(scene: Scene): boolean {
@@ -102,6 +104,14 @@ export function applyPendingMediaAllocationsToScene(scene: Scene): boolean {
  * placeholder whose rewrite landed long ago is exactly the case this catches.
  * Nothing is mutated in place; only the scenes and the stage that actually
  * change are rebuilt, so an unchanged snapshot writes through untouched.
+ *
+ * Two families of reference pass through here, because both can be stale in the
+ * same snapshot for the same reason: a slide's media slots, and a speech
+ * action's `audioId` after narration adoption converted it. The narration half
+ * matters more than it looks: adoption never deletes the derived row, so a
+ * reverted reference is adopted again on the next load and allocates a *fresh*
+ * asset every time -- one leaked pool entry per clip per load, in a store that
+ * only grows.
  */
 export function applyKnownMediaAllocations(
   stageId: string,
@@ -124,14 +134,33 @@ export function applyKnownMediaAllocations(
     return rewrites;
   };
 
+  /** The adopted id for every derived narration key this scene still holds. */
+  const narrationRewritesFor = (scene: Scene): { derivedRef: string; assetId: string }[] => {
+    const rewrites: { derivedRef: string; assetId: string }[] = [];
+    const seen = new Set<string>();
+    for (const action of scene.actions ?? []) {
+      if (action.type !== 'speech') continue;
+      const derivedRef = action.audioId;
+      if (!derivedRef || seen.has(derivedRef)) continue;
+      seen.add(derivedRef);
+      const assetId = allocatedNarrationReference(stageId, derivedRef);
+      if (assetId) rewrites.push({ derivedRef, assetId });
+    }
+    return rewrites;
+  };
+
   let changed = false;
   const nextScenes = scenes.map((scene) => {
     const rewrites = rewritesFor(sceneMediaPlaceholders(scene));
-    if (rewrites.length === 0) return scene;
+    const narrationRewrites = narrationRewritesFor(scene);
+    if (rewrites.length === 0 && narrationRewrites.length === 0) return scene;
     const next = structuredClone(scene);
     let sceneChanged = false;
     for (const rewrite of rewrites) {
       if (rewriteSceneMediaReference(next, rewrite)) sceneChanged = true;
+    }
+    for (const { derivedRef, assetId } of narrationRewrites) {
+      if (rewriteSceneNarrationReference(next, derivedRef, assetId)) sceneChanged = true;
     }
     if (!sceneChanged) return scene;
     changed = true;

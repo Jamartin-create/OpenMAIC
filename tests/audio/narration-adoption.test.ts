@@ -68,7 +68,7 @@ function audioIdOf(scene: Scene): string | undefined {
   return actions[0]?.audioId;
 }
 
-function cachedRow(): Record<string, unknown> {
+function cachedRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: derivedRef,
     stageId,
@@ -77,6 +77,7 @@ function cachedRow(): Record<string, unknown> {
     format: 'mp3',
     text: 'Welcome',
     createdAt: 0,
+    ...overrides,
   };
 }
 
@@ -136,6 +137,89 @@ describe('adopting cached narration', () => {
     expect(mocks.audioPut).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'ast_narration', originAudioId: derivedRef, stageId }),
     );
+  });
+
+  // The derived key contains no stage id and `audioFiles` is keyed by id alone,
+  // so two courses can mint the same key -- a PPTX import numbers its scenes
+  // and actions deterministically, which gives every imported deck's first
+  // slide `tts_s1_speech-scene-p1`. Locally that means one course plays
+  // another's clip in one browser. Adopting it would write that clip into the
+  // shared document permanently, for every device and every visitor.
+  it('refuses a row that belongs to another course', async () => {
+    serveDocument();
+    mocks.audioGet.mockResolvedValue(cachedRow({ stageId: 'another-course' }));
+
+    await expect(adoptCachedNarration(stageId)).resolves.toEqual({ adopted: 0, unbacked: 1 });
+
+    expect(mocks.putAsset).not.toHaveBeenCalled();
+    expect(mocks.mutateDocument).not.toHaveBeenCalled();
+    expect(audioIdOf(useStageStore.getState().scenes[0])).toBe(derivedRef);
+  });
+
+  // Rows written before the stage column existed are the population this
+  // feature exists for, so they cannot simply be refused. They are admitted on
+  // the other evidence the row carries.
+  it('adopts a legacy row with no stage whose text matches the action', async () => {
+    serveDocument();
+    mocks.audioGet.mockResolvedValue(cachedRow({ stageId: undefined, text: 'Welcome' }));
+
+    await expect(adoptCachedNarration(stageId)).resolves.toEqual({ adopted: 1, unbacked: 0 });
+
+    expect(audioIdOf(useStageStore.getState().scenes[0])).toBe('ast_narration');
+  });
+
+  it.each([
+    ['whose text is another line', { stageId: undefined, text: 'A different line entirely' }],
+    ['that records no text at all', { stageId: undefined, text: undefined }],
+    ['whose text is blank', { stageId: undefined, text: '   ' }],
+  ])('refuses a legacy row %s', async (_name, overrides) => {
+    serveDocument();
+    mocks.audioGet.mockResolvedValue(cachedRow(overrides));
+
+    await expect(adoptCachedNarration(stageId)).resolves.toEqual({ adopted: 0, unbacked: 1 });
+
+    expect(mocks.putAsset).not.toHaveBeenCalled();
+    expect(audioIdOf(useStageStore.getState().scenes[0])).toBe(derivedRef);
+  });
+
+  it('leaves a concrete address alone rather than treating it as a local key', async () => {
+    serveDocument();
+    useStageStore.setState({ scenes: [sceneWithSpeech('/classroom-media/course/clip.mp3')] });
+
+    await expect(adoptCachedNarration(stageId)).resolves.toEqual({ adopted: 0, unbacked: 0 });
+
+    expect(mocks.audioGet).not.toHaveBeenCalled();
+  });
+
+  // Allocation is uncancellable and its write-back cannot be half-undone, so
+  // the loop stops between clips: a course left mid-adoption must not have the
+  // rest of its deck allocated against it, or its document lock taken for them.
+  it('stops between clips when the course is left', async () => {
+    serveDocument();
+    mocks.audioGet.mockResolvedValue(cachedRow());
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(adoptCachedNarration(stageId, controller.signal)).resolves.toEqual({
+      adopted: 0,
+      unbacked: 0,
+    });
+
+    expect(mocks.putAsset).not.toHaveBeenCalled();
+  });
+
+  it('does not write back a clip whose course was switched during the upload', async () => {
+    serveDocument();
+    mocks.audioGet.mockResolvedValue(cachedRow());
+    mocks.putAsset.mockImplementation(async () => {
+      // The author moved on while the bytes were in flight.
+      useStageStore.setState({ stage: { id: 'another-course' } as never });
+      return 'ast_narration';
+    });
+
+    await expect(adoptCachedNarration(stageId)).resolves.toEqual({ adopted: 0, unbacked: 1 });
+
+    expect(mocks.mutateDocument).not.toHaveBeenCalled();
   });
 
   it('leaves a line whose bytes this browser does not have', async () => {

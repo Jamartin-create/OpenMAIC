@@ -1,33 +1,44 @@
 'use client';
 
 /**
- * Write an allocated narration id back into the speech action that holds a
+ * Write an allocated narration id back into the speech actions that hold a
  * derived one.
  *
  * The sibling of the generated-media write-back funnel, for the other family
- * of references a course carries. It follows the same rules, for the same
- * reasons: the write goes through `mutateDocument`, so it re-reads the current
- * document under the per-stage document lock rather than overwriting whatever
- * a concurrent editor wrote; the live stage store takes the same rewrite; and
- * the rewritten scenes are marked dirty afterwards, so an autosave round that
- * captured its snapshot before the rewrite leaves a corrective flush queued
- * behind it instead of writing the derived id back over the allocated one.
+ * of references a course carries, and it follows the same three rules for the
+ * same reasons. The write goes through `mutateDocument`, so it re-reads the
+ * current document under the per-stage lock rather than overwriting whatever a
+ * concurrent editor wrote. The live stage store takes the same rewrite and its
+ * scenes are marked dirty, so an autosave round that captured the derived id
+ * before the rewrite leaves a corrective flush queued behind it. And the
+ * rewrite is recorded, so the persistence write boundary can correct a snapshot
+ * that no dirty mark reaches -- an editor-history entry replayed by undo being
+ * the one that taught the media path this lesson.
  *
- * It is simpler than the media funnel in one way that matters: there is
- * nothing to park. A media placeholder can be committed before the slide that
- * carries it exists, so its allocation has to wait somewhere; a speech action
- * being converted is by definition already in the document being read.
+ * It is simpler than the media funnel in one way that matters: there is nothing
+ * to park. A media placeholder can be committed before the slide that carries
+ * it exists, so its allocation has to wait somewhere; a speech action being
+ * converted is by definition already in the document being read.
  */
 import { mutateDocument } from '@/lib/document-store';
 import { markStagePersistenceDirty, useStageStore } from '@/lib/store/stage';
 import type { Scene } from '@/lib/types/stage';
 import type { PendingChange } from '@/lib/utils/stage-storage';
 
+import { recordNarrationAllocation } from './narration-allocations';
+
+/** Whether any speech action in this scene still holds `derivedRef`. */
+export function sceneCarriesNarrationReference(scene: Scene, derivedRef: string): boolean {
+  return (scene.actions ?? []).some(
+    (action) => action.type === 'speech' && action.audioId === derivedRef,
+  );
+}
+
 /**
  * Point every speech action holding `derivedRef` at `assetId`, in place.
  *
- * Returns whether anything changed. A derived id is shared by no two actions
- * in practice — it is built from the scene order and the action id — but the
+ * Returns whether anything changed. A derived id is shared by no two actions in
+ * practice -- it is built from the scene order and the action id -- but the
  * rewrite is written as a sweep anyway, because a duplicated id must not leave
  * half the actions behind.
  */
@@ -40,9 +51,6 @@ export function rewriteSceneNarrationReference(
   for (const action of scene.actions ?? []) {
     if (action.type !== 'speech' || action.audioId !== derivedRef) continue;
     action.audioId = assetId;
-    // An invalidation flag belongs to the reference that was invalidated.
-    // Carrying it onto freshly stored bytes would hide them from playback.
-    if (action.audioInvalidated) delete action.audioInvalidated;
     changed = true;
   }
   return changed;
@@ -54,6 +62,10 @@ function applyToLiveStage(stageId: string, derivedRef: string, assetId: string):
 
   const dirty: PendingChange[] = [];
   const scenes = state.scenes.map((scene) => {
+    // Cloned only once the scene is known to carry the reference. Adoption runs
+    // over every clip of a course on the load path, so cloning every scene per
+    // clip would be a deck-sized deep copy per line of narration.
+    if (!sceneCarriesNarrationReference(scene, derivedRef)) return scene;
     const next = structuredClone(scene);
     if (!rewriteSceneNarrationReference(next, derivedRef, assetId)) return scene;
     dirty.push({ kind: 'scene', sceneId: next.id });
@@ -69,8 +81,8 @@ function applyToLiveStage(stageId: string, derivedRef: string, assetId: string):
 }
 
 /**
- * Persist the rewrite, and report whether the reference is now — or is queued
- * to become — the allocated id.
+ * Persist the rewrite, and report whether the reference is now -- or is queued
+ * to become -- the allocated id.
  *
  * A document write that fails still leaves the live store rewritten: the bytes
  * are stored either way, and the next ordinary flush is what carries the id to
@@ -83,6 +95,11 @@ export async function persistNarrationReference(
   assetId: string,
 ): Promise<boolean> {
   let documentMatched = false;
+  // Recorded before the first write is issued, not after the round trip ends:
+  // a save that flushes during that trip captures its snapshot from the live
+  // store, and the write boundary can only correct it against a record that
+  // already exists.
+  recordNarrationAllocation(stageId, derivedRef, assetId);
   try {
     await mutateDocument(stageId, async (document, store) => {
       if (!document) return;

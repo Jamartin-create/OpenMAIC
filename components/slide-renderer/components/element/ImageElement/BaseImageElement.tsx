@@ -100,7 +100,8 @@ export function BaseImageElement({ elementInfo }: BaseImageElementProps) {
                     <ShieldAlert className="w-3 h-3 shrink-0" />
                     <span>{t(failureNotice)}</span>
                   </div>
-                ) : canRetry ? (
+                ) : null}
+                {canRetry ? (
                   <button
                     onClick={(e) => {
                       e.stopPropagation();

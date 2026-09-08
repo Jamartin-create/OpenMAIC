@@ -1,44 +1,70 @@
 /**
  * What a failed media task means, and whether asking again could change it.
  *
- * A media task fails for two very different reasons, and the difference has to
- * be visible in one place rather than re-derived at every affordance. A
- * transient failure — a timed-out provider, a dropped connection — is worth a
- * Retry. A refusal is not: the provider declined the content, the setting is
- * off, or the asset store is full. Offering Retry for a refusal invites the
- * user to buy the same generation over and over, and each attempt costs the
- * deployment a provider call before failing in exactly the same way.
+ * A media task fails for three different reasons, and the difference has to be
+ * visible in one place rather than re-derived at every affordance.
  *
- * Every permanent code is also written to the local media table, so it survives
- * a reload as a `failed` task and the next generation pass skips the element
- * instead of paying for it again.
+ * A transient failure — a timed-out provider, a dropped connection — is worth a
+ * Retry, and says nothing to the user beyond that.
+ *
+ * A refusal of the content or the configuration is not retryable at all: the
+ * provider declined the content, or generation is switched off. Nothing the
+ * user does changes either, so the element says why instead of offering a
+ * button that would spend a provider call to fail identically.
+ *
+ * A full asset store is a third thing, and it took a review round to separate
+ * it from the second. It is neither the content's fault nor the
+ * configuration's: it is an environmental condition an operator clears in one
+ * environment variable. So it says why — a Retry with no explanation would look
+ * like an ordinary failure — and it still offers the Retry, because after the
+ * ceiling is raised that Retry is the only way back, and it costs nothing: the
+ * bytes were kept, so it re-attempts the upload rather than the generation. It
+ * is never retried automatically, by a pass or by a reload, so nothing about
+ * this re-bills anyone.
+ *
+ * Every code here is written to the local media table, so it survives a reload
+ * as a `failed` task and the next generation pass skips the element instead of
+ * paying for it again.
  */
 
 /** The store is full. Raised by the asset layer, not by a generation route. */
 export const ASSET_QUOTA_EXCEEDED = 'ASSET_QUOTA_EXCEEDED';
 
 /**
- * Codes a retry cannot change.
+ * Codes no retry can change.
  *
- * `CONTENT_SENSITIVE` is the provider's own refusal, `GENERATION_DISABLED` is
- * the deployment's, and `ASSET_QUOTA_EXCEEDED` is the store's. Anything else,
- * including an absent code, stays retryable — an unknown failure is treated as
- * transient, because the cost of one extra attempt is much smaller than the
- * cost of a slide that can never be recovered.
+ * `CONTENT_SENSITIVE` is the provider's refusal of this content and
+ * `GENERATION_DISABLED` is the deployment's refusal of this kind of media;
+ * asking again produces the same answer and another provider call.
+ * `ASSET_QUOTA_EXCEEDED` is deliberately NOT here — see the module comment.
+ *
+ * Anything else, including an absent code, stays retryable: an unknown failure
+ * is treated as transient, because the cost of one extra attempt is much
+ * smaller than the cost of a slide that can never be recovered.
  */
 const PERMANENT_MEDIA_FAILURE_CODES: ReadonlySet<string> = new Set([
   'CONTENT_SENSITIVE',
   'GENERATION_DISABLED',
-  ASSET_QUOTA_EXCEEDED,
 ]);
 
-/** Whether a failed task may be tried again. */
+/** Whether a failed task may be tried again, by a person asking for it. */
 export function isRetryableMediaFailure(task: { readonly errorCode?: string }): boolean {
   return task.errorCode === undefined || !PERMANENT_MEDIA_FAILURE_CODES.has(task.errorCode);
 }
 
 /**
- * The message to show instead of a Retry button, for a refusal that has one.
+ * Whether this failure means the asset store had no room.
+ *
+ * Read by the generation pass, which stops at the first one: the store is a
+ * deployment-wide ceiling, so once it is full every remaining element of the
+ * deck would pay a provider and be refused at exactly the same point.
+ */
+export function isStorageFullFailure(errorCode: string | undefined): boolean {
+  return errorCode === ASSET_QUOTA_EXCEEDED;
+}
+
+/**
+ * The message to show above the Retry affordance, for a failure that has one.
  *
  * `GENERATION_DISABLED` is absent on purpose: a disabled generation setting has
  * its own state in the renderer, painted before any failure is considered.

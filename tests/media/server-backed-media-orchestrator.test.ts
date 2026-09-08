@@ -578,38 +578,166 @@ describe('server-backed classic media orchestrator', () => {
   // A full store is a refusal, not a hiccup. Offering Retry for it invites the
   // author to buy the same generation over and over, each attempt paying a
   // provider before failing in exactly the same way.
-  it('remembers a full asset store as a permanent refusal', async () => {
-    serveImage();
-    noteStageGenerationOwnership(stageId, 'owner');
-    const quotaRefusal = Object.assign(new Error('asset quota exceeded for this principal'), {
-      status: 507,
-      code: 'ASSET_QUOTA_EXCEEDED',
-    });
-    mocks.putAsset.mockRejectedValue(quotaRefusal);
+  // A full store is not the content's fault and not the configuration's: an
+  // operator clears it in one environment variable. So the refusal keeps
+  // everything that would otherwise have to be bought again, stops the deck
+  // before the rest of it is spent on the same wall, and stays clearable.
+  describe('a full asset store', () => {
+    const quotaRefusal = () =>
+      Object.assign(new Error('asset quota exceeded for this principal'), {
+        status: 507,
+        code: 'ASSET_QUOTA_EXCEEDED',
+      });
 
-    await runImageGeneration();
+    it('keeps the bytes it refused, so nothing has to be generated twice', async () => {
+      serveImage();
+      noteStageGenerationOwnership(stageId, 'owner');
+      mocks.putAsset.mockRejectedValue(quotaRefusal());
 
-    const failed = useMediaGenerationStore.getState().tasks[imageRef];
-    expect(failed?.status).toBe('failed');
-    expect(failed?.errorCode).toBe('ASSET_QUOTA_EXCEEDED');
-    // Written to the local table, which is what makes the refusal survive a
-    // reload: a restored task carrying an error is a `failed` task, and the
-    // next pass skips a failed element instead of paying for it again.
-    expect(mocks.mediaPut).toHaveBeenCalledWith(
-      expect.objectContaining({
+      await runImageGeneration();
+
+      const failed = useMediaGenerationStore.getState().tasks[imageRef];
+      expect(failed?.status).toBe('failed');
+      expect(failed?.errorCode).toBe('ASSET_QUOTA_EXCEEDED');
+      const [record] = mocks.mediaPut.mock.calls.at(-1) as [Record<string, unknown>];
+      expect(record).toMatchObject({
         id: `${stageId}:${imageRef}`,
         errorCode: 'ASSET_QUOTA_EXCEEDED',
-      }),
-    );
+        placeholderRef: imageRef,
+      });
+      // The bytes, not an empty placeholder over them.
+      await expect((record.blob as Blob).text()).resolves.toBe('server-image');
+      expect(record.size).toBe((record.blob as Blob).size);
+    });
 
-    // The next load: same task table, no second provider call.
-    resetMediaPassesForTests();
-    await runImageGeneration();
-    expect(providerCallCount()).toBe(1);
+    // The row this writes over IS the only copy a pre-server-backed course has
+    // of its own media. Overwriting it with an empty blob would destroy media
+    // that a raised ceiling could still have saved.
+    it('does not destroy a legacy course\u2019s only copy of its media', async () => {
+      serveImage();
+      const cached = {
+        id: `${stageId}:${imageRef}`,
+        stageId,
+        type: 'image' as const,
+        blob: new Blob(['legacy-bytes'], { type: 'image/png' }),
+        mimeType: 'image/png',
+        size: 12,
+        prompt: 'A diagram',
+        params: '{}',
+        createdAt: 0,
+      };
+      mocks.mediaGet.mockResolvedValue(cached);
+      mocks.putAsset.mockRejectedValue(quotaRefusal());
 
-    // And the affordance's action refuses even if a stale button is pressed.
-    await retryMediaTask(imageRef);
-    expect(providerCallCount()).toBe(1);
+      await runImageGeneration();
+
+      expect(providerCallCount()).toBe(0);
+      const [record] = mocks.mediaPut.mock.calls.at(-1) as [Record<string, unknown>];
+      await expect((record.blob as Blob).text()).resolves.toBe('legacy-bytes');
+    });
+
+    it('stops the pass instead of spending the rest of the deck on the same wall', async () => {
+      serveImage();
+      const refs = ['gen_img_1', 'gen_img_2', 'gen_img_3'];
+      mocks.stageState.mockReturnValue({
+        stage: { id: stageId },
+        scenes: refs.map((ref, index) => sceneWithImage(index + 1, ref)),
+        generationComplete: false,
+      });
+      mocks.putAsset.mockRejectedValue(quotaRefusal());
+
+      await generateMediaForOutlines(
+        refs.map((ref, index) =>
+          outlineWith(index + 1, { type: 'image', prompt: 'A diagram', elementId: ref }),
+        ),
+        stageId,
+      );
+
+      // One element paid for a provider and was refused; the other two were
+      // never asked for.
+      expect(providerCallCount()).toBe(1);
+      expect(mocks.putAsset).toHaveBeenCalledTimes(1);
+      const tasks = useMediaGenerationStore.getState().tasks;
+      for (const ref of refs) {
+        expect(tasks[ref]?.status).toBe('failed');
+        expect(tasks[ref]?.errorCode).toBe('ASSET_QUOTA_EXCEEDED');
+      }
+      // Only the element that actually reached the store has a persisted
+      // record: the others were never attempted, so a later load may still
+      // generate them once.
+      const persisted = mocks.mediaPut.mock.calls
+        .map(([row]) => row as { id: string })
+        .filter((row) => row.id.startsWith(`${stageId}:gen_img_`));
+      expect(persisted.map((row) => row.id)).toEqual([`${stageId}:gen_img_1`]);
+    });
+
+    it('is not retried by a later pass on its own', async () => {
+      serveImage();
+      mocks.putAsset.mockRejectedValue(quotaRefusal());
+      await runImageGeneration();
+      expect(providerCallCount()).toBe(1);
+
+      resetMediaPassesForTests();
+      await runImageGeneration();
+
+      expect(providerCallCount()).toBe(1);
+      expect(mocks.putAsset).toHaveBeenCalledTimes(1);
+    });
+
+    // The way back. After the operator raises the ceiling, the author's Retry
+    // re-attempts the upload with the bytes that were kept -- no provider, no
+    // second bill -- and the document converges.
+    it('converges for free on an explicit retry once the ceiling is raised', async () => {
+      serveImage();
+      noteStageGenerationOwnership(stageId, 'owner');
+      mocks.putAsset.mockRejectedValue(quotaRefusal());
+      await runImageGeneration();
+      expect(providerCallCount()).toBe(1);
+
+      // The refused row is what the retry reads back.
+      const [refusedRow] = mocks.mediaPut.mock.calls.at(-1) as [Record<string, unknown>];
+      mocks.mediaGet.mockResolvedValue(refusedRow);
+      mocks.putAsset.mockReset().mockResolvedValue('ast_after_raise');
+
+      await retryMediaTask(imageRef);
+
+      expect(providerCallCount()).toBe(1);
+      expect(mocks.putAsset).toHaveBeenCalledTimes(1);
+      const [stored] = mocks.putAsset.mock.calls[0] as [Blob];
+      await expect(stored.text()).resolves.toBe('server-image');
+      expect(mocks.persistReference).toHaveBeenCalledWith(
+        expect.objectContaining({ placeholderRef: imageRef, assetId: 'ast_after_raise' }),
+      );
+      expect(useMediaGenerationStore.getState().tasks.ast_after_raise?.status).toBe('done');
+    });
+
+    it('falls back to one generation when the retry has no bytes to re-upload', async () => {
+      serveImage();
+      noteStageGenerationOwnership(stageId, 'owner');
+      useMediaGenerationStore.setState({
+        tasks: {
+          [imageRef]: {
+            elementId: imageRef,
+            type: 'image',
+            status: 'failed',
+            prompt: 'A diagram',
+            params: {},
+            retryCount: 0,
+            stageId,
+            error: 'Asset storage is full; the image was not generated',
+            errorCode: 'ASSET_QUOTA_EXCEEDED',
+          },
+        },
+      });
+      mocks.mediaGet.mockResolvedValue(undefined);
+
+      await retryMediaTask(imageRef);
+
+      expect(providerCallCount()).toBe(1);
+      expect(mocks.persistReference).toHaveBeenCalledWith(
+        expect.objectContaining({ placeholderRef: imageRef, assetId: 'ast_generated' }),
+      );
+    });
   });
 
   it('leaves an ordinary asset failure retryable', async () => {

@@ -35,6 +35,8 @@ import { loadImageMapping } from '@/lib/utils/image-storage';
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useSceneGenerator } from '@/lib/hooks/use-scene-generator';
 import { useMediaGenerationStore } from '@/lib/store/media-generation';
+import { clearNarrationAllocations } from '@/lib/audio/narration-allocations';
+import { useNarrationAdoption } from '@/lib/audio/use-narration-adoption';
 import { clearPendingMediaAllocations } from '@/lib/media/pending-media-allocations';
 import { useWhiteboardHistoryStore } from '@/lib/store/whiteboard-history';
 import { useCanvasStore } from '@/lib/store/canvas';
@@ -198,6 +200,7 @@ export function ClassroomSurface({
     // Classic placeholders are reused across runs of the same course, so a
     // survivor would be handed to a different slide of the next deck.
     clearPendingMediaAllocations(classroomId);
+    clearNarrationAllocations(classroomId);
 
     // Clear whiteboard history to prevent snapshots from a previous course leaking in.
     useWhiteboardHistoryStore.getState().clearHistory();
@@ -269,6 +272,12 @@ export function ClassroomSurface({
       stop();
     };
   }, [classroomId, loadClassroom, stop, variant]);
+
+  // Narration written before this application stored media server-side is a
+  // derived key that only this browser can resolve. Both classroom surfaces
+  // mount this, so a course opened through the workbench pane converges its
+  // narration exactly as the standalone page does.
+  useNarrationAdoption(classroomId, { ready: !loading && !error, mayGenerate });
 
   // Auto-resume generation for pending outlines (owner only). Two independent
   // ownership facts gate it. The sidecar's per-viewer answer decides whether

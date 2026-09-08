@@ -115,7 +115,8 @@ function PlaybackVideoContent({
             <ShieldAlert className="h-3 w-3 shrink-0" />
             <span>{t(failureNotice)}</span>
           </div>
-        ) : canRetry ? (
+        ) : null}
+        {canRetry ? (
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -255,7 +256,8 @@ export function PlaybackImageContent({
             <ShieldAlert className="h-3 w-3 shrink-0" />
             <span>{t(failureNotice)}</span>
           </div>
-        ) : canRetry ? (
+        ) : null}
+        {canRetry ? (
           <button
             onClick={(event) => {
               event.stopPropagation();

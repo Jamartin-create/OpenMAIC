@@ -28,6 +28,16 @@ export async function register(): Promise<void> {
   const { validateServerConfig } = await import('@/lib/server/config-validation');
   validateServerConfig();
 
+  // The asset quota, read here rather than at the first persistence request.
+  // The provider that consumes it is lazy and memoised, so a malformed ceiling
+  // would otherwise let the process boot, pass its health check, and then fail
+  // every persistence request -- documents and runtime included -- until it was
+  // fixed and the process restarted. `register` runs before the server is
+  // ready, so throwing here is what makes a misconfigured deployment fail to
+  // start instead of failing to work.
+  const { resolveAssetQuotaBytes } = await import('@/lib/persistence/asset-quota');
+  resolveAssetQuotaBytes();
+
   let runner: import('@/lib/server/agent-runtime/runner').AgentRunnerHandle | undefined;
   let extractionRunner:
     | import('@/lib/server/material-extraction/runner').MaterialExtractionRunnerHandle
