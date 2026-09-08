@@ -421,7 +421,10 @@ concurrent uploads cannot race past it. Until per-user asset principals land
 every caller shares one principal, which makes this a deployment-wide ceiling
 rather than a per-user one — and one worth having, because allocation is
 reachable by any caller the deployment admits. Set `ASSET_QUOTA_BYTES=0` to opt
-out and bound storage elsewhere.
+out and bound storage elsewhere; any spelling of zero does it. A value that is
+not a non-negative integer is refused at persistence startup rather than
+replaced by the default, so a mistyped ceiling fails where it can be fixed
+instead of quietly running on a limit nobody chose.
 
 Assets are read and allocated by any caller the deployment admits, and are never
 replaced or deleted through this endpoint: those operations would scope to the

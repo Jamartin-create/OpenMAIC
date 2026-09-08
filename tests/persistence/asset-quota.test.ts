@@ -26,18 +26,20 @@ describe('asset quota configuration', () => {
     expect(resolveAssetQuotaBytes()).toBe(1_048_576);
   });
 
-  it('lets a deployment opt out explicitly', () => {
-    vi.stubEnv('ASSET_QUOTA_BYTES', '0');
+  // Zero is an intent, not a spelling. An operator who opted out with `0.0`
+  // and silently got a 10 GiB ceiling would find out from a refused upload.
+  it.each(['0', ' 0 ', '00', '0.0', '+0', '0e0'])('lets a deployment opt out with %s', (raw) => {
+    vi.stubEnv('ASSET_QUOTA_BYTES', raw);
     expect(resolveAssetQuotaBytes()).toBeUndefined();
   });
 
-  it.each(['-1', 'lots', '1.5', '1e999'])(
-    'falls back to the default rather than trusting %s',
+  // Falling back to a default here is the worst outcome available: the
+  // operator gets neither the ceiling they wrote nor a failure they notice.
+  it.each(['-1', 'lots', '1.5', '10GB', '1e999', 'NaN', 'Infinity'])(
+    'refuses %s instead of quietly running on a limit nobody chose',
     (raw) => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       vi.stubEnv('ASSET_QUOTA_BYTES', raw);
-      expect(resolveAssetQuotaBytes()).toBe(DEFAULT);
-      expect(warn).toHaveBeenCalledOnce();
+      expect(() => resolveAssetQuotaBytes()).toThrow(/ASSET_QUOTA_BYTES/);
     },
   );
 });

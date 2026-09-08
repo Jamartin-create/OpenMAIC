@@ -10,6 +10,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import { useSceneGenerator } from '@/lib/hooks/use-scene-generator';
 import { useMediaGenerationStore } from '@/lib/store/media-generation';
+import { adoptCachedNarration } from '@/lib/audio/adopt-cached-narration';
 import { clearPendingMediaAllocations } from '@/lib/media/pending-media-allocations';
 import { useWhiteboardHistoryStore } from '@/lib/store/whiteboard-history';
 import { createLogger } from '@/lib/logger';
@@ -54,6 +55,7 @@ export default function ClassroomDetailPage() {
   const mayGenerate = mayStartOwnerGeneration(isServerBackedMediaPersistence(), ownership);
 
   const generationStartedRef = useRef(false);
+  const narrationAdoptedRef = useRef(false);
 
   const { generateRemaining, retrySingleOutline, stop } = useSceneGenerator({
     onComplete: () => {
@@ -143,6 +145,7 @@ export default function ClassroomDetailPage() {
     // before anything it holds may be generated.
     noteStageGenerationOwnership(classroomId, 'unresolved');
     generationStartedRef.current = false;
+    narrationAdoptedRef.current = false;
 
     // Clear previous classroom's media tasks to prevent cross-classroom contamination.
     // Placeholder IDs (gen_img_1, gen_vid_1) are NOT globally unique across stages,
@@ -179,6 +182,19 @@ export default function ClassroomDetailPage() {
 
     const state = useStageStore.getState();
     const { outlines, scenes, stage, generationComplete } = state;
+
+    // Narration written before this application stored media server-side is a
+    // derived key that only this browser can resolve. The owner's browser
+    // still has the bytes, so it converts them once per load — no provider
+    // call, and a course whose narration is already allocated finds nothing to
+    // do. Kept out of the branches below because it is true of a finished deck
+    // and an interrupted one alike, and it is not part of resuming either.
+    if (stage && !narrationAdoptedRef.current) {
+      narrationAdoptedRef.current = true;
+      void adoptCachedNarration(stage.id).catch((err: unknown) => {
+        log.warn('[Classroom] Narration adoption error:', err);
+      });
+    }
 
     // Check if there are pending outlines. A finished deck is frozen for
     // editing: deleting a slide leaves its outline orphaned, but that must not

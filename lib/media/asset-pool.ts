@@ -1,7 +1,7 @@
 import '@/lib/persistence/bootstrap';
 
 import type { AssetMeta, BinaryBlob } from '@openmaic/dsl';
-import { BrowserAssetStore, toAssetId } from '@openmaic/storage';
+import { BrowserAssetStore } from '@openmaic/storage';
 import {
   isAssetPoolServerBacked,
   registerAssetPoolStorageResetHook,
@@ -92,10 +92,6 @@ export function getAssetPool(): AssetPoolStore {
  */
 export function putAsset(data: BinaryBlob, meta?: AssetMeta): Promise<string> {
   return getAssetPool().put(data, meta);
-}
-
-export function removeAsset(ref: string): Promise<void> {
-  return getAssetPool().remove(toAssetId(ref));
 }
 
 function deleteAssetPoolDatabase(): Promise<void> {

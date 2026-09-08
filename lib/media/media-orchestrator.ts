@@ -22,10 +22,11 @@ import { useMediaGenerationStore } from '@/lib/store/media-generation';
 import { useSettingsStore } from '@/lib/store/settings';
 import { useStageStore } from '@/lib/store/stage';
 import { mayGenerateForStage } from '@/lib/classroom/generation-permission';
-import { db, mediaFileKey } from '@/lib/utils/database';
+import { db, mediaFileKey, type MediaFileRecord } from '@/lib/utils/database';
 import type { SceneOutline } from '@/lib/types/generation';
 import type { MediaGenerationRequest } from '@/lib/media/types';
 import { putAsset } from '@/lib/media/asset-pool';
+import { ASSET_QUOTA_EXCEEDED, isRetryableMediaFailure } from '@/lib/media/media-failure';
 import {
   indexGeneratedMediaReferences,
   isGeneratedMediaSatisfied,
@@ -94,6 +95,28 @@ class MediaApiError extends Error {
     super(message);
     this.errorCode = errorCode;
   }
+}
+
+/**
+ * The structured code a failure should be remembered by, if it has one.
+ *
+ * A code is what makes a failure permanent: it is written to the local table,
+ * survives a reload as a `failed` task, and turns off the Retry affordance. So
+ * it is reserved for refusals a retry cannot change — a provider's content
+ * decision, a disabled generation setting, and a full asset store.
+ *
+ * The quota refusal reaches this browser as the asset client's error, whose
+ * `code` is the one the storage contract puts in the response body. Matching
+ * on the code rather than on the client's error class is deliberate: the class
+ * is not always the one this bundle imported, while the code is the part of
+ * the contract that crosses every boundary. Everything else stays retryable,
+ * because everything else might work next time.
+ */
+function mediaFailureCode(error: unknown): string | undefined {
+  if (error instanceof MediaApiError) return error.errorCode;
+  if (typeof error !== 'object' || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return code === ASSET_QUOTA_EXCEEDED ? ASSET_QUOTA_EXCEEDED : undefined;
 }
 
 function createAbortError(): Error {
@@ -242,6 +265,13 @@ export async function retryMediaTask(
   const store = useMediaGenerationStore.getState();
   const task = store.getTask(elementId);
   if (!task || task.status !== 'failed') return;
+
+  // A permanent refusal is not retryable, and the affordance that calls this is
+  // already hidden for one. Refusing here too keeps the render condition and
+  // the action precondition the same rule rather than two that can drift —
+  // and, for a full asset store, keeps a stale button from buying a second
+  // generation that has nowhere to be stored.
+  if (!isRetryableMediaFailure(task)) return;
 
   // The affordance that calls this is already hidden when generation is not
   // permitted; refusing here too is what makes the render condition and the
@@ -421,6 +451,55 @@ async function commitPooledMedia(args: {
 }
 
 /**
+ * The locally cached bytes for a placeholder, under either key this
+ * application has used for them.
+ *
+ * A course generated before server-backed storage has its row under the
+ * placeholder itself (`${stageId}:gen_img_3`), because that was the only id
+ * there was. A course generated after it has the same bytes under the
+ * allocated id (`${stageId}:ast_…`), with the placeholder it replaced recorded
+ * in `placeholderRef`. Both are "bytes this browser already paid for", and a
+ * document that carries the placeholder again — a rollback, a restored backup,
+ * an edit that reinstated an outline — must be able to adopt either. Looking
+ * only under the placeholder key was enough for the first layout and silently
+ * regenerated the second.
+ *
+ * A row that records only a hosted URL (`ossKey`) and no bytes is treated as
+ * absent: that URL is the provider's address, not something a document may
+ * hold. A row recording a permanent failure is absent too — it is a refusal,
+ * not media.
+ */
+async function adoptableCachedMedia(
+  stageId: string,
+  placeholderRef: string,
+): Promise<{ blob: Blob; poster?: Blob } | undefined> {
+  const usable = (row: MediaFileRecord | undefined): { blob: Blob; poster?: Blob } | undefined => {
+    if (!row || row.error || !row.blob || row.blob.size === 0) return undefined;
+    return { blob: row.blob, ...(row.poster ? { poster: row.poster } : {}) };
+  };
+
+  const direct = usable(
+    await db.mediaFiles.get(mediaFileKey(stageId, placeholderRef)).catch(() => undefined),
+  );
+  if (direct) return direct;
+
+  // Stage-scoped, and only after the keyed lookup missed: `placeholderRef` is
+  // not indexed, and a course's media table is small, but there is no reason
+  // to scan it on the ordinary path.
+  const rows = await db.mediaFiles
+    .where('stageId')
+    .equals(stageId)
+    .toArray()
+    .catch(() => [] as MediaFileRecord[]);
+  for (const row of rows) {
+    if (row.placeholderRef !== placeholderRef) continue;
+    const adoptable = usable(row);
+    if (adoptable) return adoptable;
+  }
+  return undefined;
+}
+
+/**
  * Adopt bytes this browser already holds for a placeholder, without asking a
  * provider for them again.
  *
@@ -440,12 +519,17 @@ async function commitCachedMedia(
   req: MediaGenerationRequest,
   stageId: string,
   paramsJson: string,
+  abortSignal?: AbortSignal,
 ): Promise<boolean> {
-  const cached = await db.mediaFiles
-    .get(mediaFileKey(stageId, req.elementId))
-    .catch(() => undefined);
+  const cached = await adoptableCachedMedia(stageId, req.elementId);
   const blob = cached?.blob;
-  if (!cached || cached.error || !blob || blob.size === 0) return false;
+  if (!cached || !blob || blob.size === 0) return false;
+  // The read above is the only thing that has happened so far, and it is
+  // cheap. Everything after it is not: a `put` cannot be cancelled and its
+  // write-back cannot be half-undone, so a pass whose course has already been
+  // left stops here rather than committing into a document nobody is looking
+  // at.
+  throwIfAborted(abortSignal);
 
   const poster = cached.poster && cached.poster.size > 0 ? cached.poster : undefined;
   log.info(`Adopting locally cached bytes for ${req.elementId}; no provider call.`);
@@ -494,7 +578,7 @@ async function generateSingleMedia(
     // placeholders in its document and its bytes only in the author's local
     // tables. Those bytes are already paid for, so the author's first
     // server-backed load converts them instead of buying them again.
-    if (serverBacked && (await commitCachedMedia(req, stageId, paramsJson))) return;
+    if (serverBacked && (await commitCachedMedia(req, stageId, paramsJson, abortSignal))) return;
 
     if (req.type === 'image') {
       const result = await callImageApi(req, stageId, abortSignal);
@@ -631,7 +715,7 @@ async function generateSingleMedia(
       return;
     }
     const message = err instanceof Error ? err.message : String(err);
-    const errorCode = err instanceof MediaApiError ? err.errorCode : undefined;
+    const errorCode = mediaFailureCode(err);
     log.error(`Failed ${req.elementId}:`, message);
     useMediaGenerationStore.getState().markFailed(req.elementId, message, errorCode);
 

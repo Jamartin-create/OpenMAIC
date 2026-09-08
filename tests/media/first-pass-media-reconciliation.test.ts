@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   mediaPut: vi.fn(),
   mediaDelete: vi.fn(),
   mediaGet: vi.fn(),
+  mediaRows: [] as Record<string, unknown>[],
   putAsset: vi.fn(),
   removeAsset: vi.fn(),
   mutateDocument: vi.fn(),
@@ -31,7 +32,17 @@ vi.mock('@/lib/store/settings', () => ({
 vi.mock('@/lib/utils/database', () => ({
   mediaFileKey: (stageId: string, ref: string) => `${stageId}:${ref}`,
   db: {
-    mediaFiles: { put: mocks.mediaPut, delete: mocks.mediaDelete, get: mocks.mediaGet },
+    mediaFiles: {
+      put: mocks.mediaPut,
+      delete: mocks.mediaDelete,
+      get: mocks.mediaGet,
+      where: (index: string) => ({
+        equals: (value: unknown) => ({
+          toArray: async () =>
+            mocks.mediaRows.filter((row) => (row as Record<string, unknown>)[index] === value),
+        }),
+      }),
+    },
   },
 }));
 

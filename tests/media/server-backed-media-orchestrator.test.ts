@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   mediaPut: vi.fn(),
   mediaDelete: vi.fn(),
   mediaGet: vi.fn(),
+  mediaRows: [] as Record<string, unknown>[],
   putAsset: vi.fn(),
   removeAsset: vi.fn(),
   persistReference: vi.fn(),
@@ -39,6 +40,13 @@ vi.mock('@/lib/utils/database', () => ({
       put: mocks.mediaPut,
       delete: mocks.mediaDelete,
       get: mocks.mediaGet,
+      // The stage-scoped fallback the placeholder-keyed lookup falls back to.
+      where: (index: string) => ({
+        equals: (value: unknown) => ({
+          toArray: async () =>
+            mocks.mediaRows.filter((row) => (row as Record<string, unknown>)[index] === value),
+        }),
+      }),
     },
   },
 }));
@@ -136,6 +144,7 @@ describe('server-backed classic media orchestrator', () => {
     mocks.mediaPut.mockReset().mockResolvedValue(undefined);
     mocks.mediaDelete.mockReset().mockResolvedValue(undefined);
     mocks.mediaGet.mockReset().mockResolvedValue(undefined);
+    mocks.mediaRows.length = 0;
     mocks.putAsset.mockReset().mockResolvedValue('ast_generated');
     mocks.removeAsset.mockReset().mockResolvedValue(undefined);
     mocks.persistReference.mockReset().mockResolvedValue('written');
@@ -468,6 +477,9 @@ describe('server-backed classic media orchestrator', () => {
     await runImageGeneration();
 
     expect(providerCallCount()).toBe(0);
+    // Stage-scoped. A globally keyed lookup would adopt another course's bytes
+    // for a placeholder id that is not unique across courses.
+    expect(mocks.mediaGet).toHaveBeenCalledWith(`${stageId}:${imageRef}`);
     const [stored, meta] = mocks.putAsset.mock.calls[0] as [Blob, { contentType: string }];
     await expect(stored.text()).resolves.toBe('cached-bytes');
     expect(meta).toEqual({ contentType: 'image/png' });
@@ -477,12 +489,162 @@ describe('server-backed classic media orchestrator', () => {
     expect(useMediaGenerationStore.getState().tasks.ast_generated?.status).toBe('done');
   });
 
+  // The bytes a placeholder's own key does not find may still be here. A
+  // course generated AFTER server-backed storage keys its rows by the
+  // allocated id and records the placeholder it replaced; a document that
+  // carries the placeholder again -- a rollback, a restored backup -- has to
+  // adopt those rather than buy them a second time.
+  it('adopts cached bytes recorded under an allocated id, with no provider call', async () => {
+    serveImage();
+    mocks.mediaGet.mockResolvedValue(undefined);
+    mocks.mediaRows.push({
+      id: `${stageId}:ast_previous`,
+      stageId,
+      type: 'image',
+      blob: new Blob(['post-upgrade-bytes'], { type: 'image/png' }),
+      mimeType: 'image/png',
+      size: 18,
+      placeholderRef: imageRef,
+      prompt: 'A diagram',
+      params: '{}',
+      createdAt: 0,
+    });
+
+    await runImageGeneration();
+
+    expect(providerCallCount()).toBe(0);
+    const [stored] = mocks.putAsset.mock.calls[0] as [Blob];
+    await expect(stored.text()).resolves.toBe('post-upgrade-bytes');
+    expect(mocks.persistReference).toHaveBeenCalledWith(
+      expect.objectContaining({ stageId, placeholderRef: imageRef, assetId: 'ast_generated' }),
+    );
+  });
+
+  it('ignores an allocated-id row belonging to another placeholder', async () => {
+    serveImage();
+    mocks.mediaGet.mockResolvedValue(undefined);
+    mocks.mediaRows.push({
+      id: `${stageId}:ast_previous`,
+      stageId,
+      type: 'image',
+      blob: new Blob(['someone-elses-bytes'], { type: 'image/png' }),
+      mimeType: 'image/png',
+      size: 19,
+      placeholderRef: 'gen_img_other',
+      prompt: 'A diagram',
+      params: '{}',
+      createdAt: 0,
+    });
+
+    await runImageGeneration();
+
+    expect(providerCallCount()).toBe(1);
+  });
+
+  // Reading the cache is cheap; everything after it is not. A `put` cannot be
+  // cancelled and its write-back cannot be half-undone, so a pass whose course
+  // has already been left must stop at the read.
+  it('does not commit adopted bytes once the pass has been aborted', async () => {
+    serveImage();
+    const controller = new AbortController();
+    mocks.mediaGet.mockImplementation(async () => {
+      controller.abort();
+      return {
+        id: `${stageId}:${imageRef}`,
+        stageId,
+        type: 'image',
+        blob: new Blob(['cached-bytes'], { type: 'image/png' }),
+        mimeType: 'image/png',
+        size: 12,
+        prompt: 'A diagram',
+        params: '{}',
+        createdAt: 0,
+      };
+    });
+
+    await generateMediaForOutlines(
+      [outlineWith(1, { type: 'image', prompt: 'A diagram', elementId: imageRef })],
+      stageId,
+      controller.signal,
+    );
+
+    expect(mocks.putAsset).not.toHaveBeenCalled();
+    expect(mocks.persistReference).not.toHaveBeenCalled();
+    expect(providerCallCount()).toBe(0);
+    // Retryable, not stuck: the element was never committed anywhere.
+    expect(useMediaGenerationStore.getState().tasks[imageRef]?.status).toBe('failed');
+  });
+
+  // A full store is a refusal, not a hiccup. Offering Retry for it invites the
+  // author to buy the same generation over and over, each attempt paying a
+  // provider before failing in exactly the same way.
+  it('remembers a full asset store as a permanent refusal', async () => {
+    serveImage();
+    noteStageGenerationOwnership(stageId, 'owner');
+    const quotaRefusal = Object.assign(new Error('asset quota exceeded for this principal'), {
+      status: 507,
+      code: 'ASSET_QUOTA_EXCEEDED',
+    });
+    mocks.putAsset.mockRejectedValue(quotaRefusal);
+
+    await runImageGeneration();
+
+    const failed = useMediaGenerationStore.getState().tasks[imageRef];
+    expect(failed?.status).toBe('failed');
+    expect(failed?.errorCode).toBe('ASSET_QUOTA_EXCEEDED');
+    // Written to the local table, which is what makes the refusal survive a
+    // reload: a restored task carrying an error is a `failed` task, and the
+    // next pass skips a failed element instead of paying for it again.
+    expect(mocks.mediaPut).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: `${stageId}:${imageRef}`,
+        errorCode: 'ASSET_QUOTA_EXCEEDED',
+      }),
+    );
+
+    // The next load: same task table, no second provider call.
+    resetMediaPassesForTests();
+    await runImageGeneration();
+    expect(providerCallCount()).toBe(1);
+
+    // And the affordance's action refuses even if a stale button is pressed.
+    await retryMediaTask(imageRef);
+    expect(providerCallCount()).toBe(1);
+  });
+
+  it('leaves an ordinary asset failure retryable', async () => {
+    serveImage();
+    noteStageGenerationOwnership(stageId, 'owner');
+    mocks.putAsset.mockRejectedValueOnce(
+      Object.assign(new Error('asset registry put failed'), { status: 500 }),
+    );
+
+    await runImageGeneration();
+
+    const failed = useMediaGenerationStore.getState().tasks[imageRef];
+    expect(failed?.status).toBe('failed');
+    expect(failed?.errorCode).toBeUndefined();
+    // No permanent record: nothing about this refuses a later attempt.
+    expect(mocks.mediaPut).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: `${stageId}:${imageRef}` }),
+    );
+
+    mocks.putAsset.mockResolvedValue('ast_second_try');
+    await retryMediaTask(imageRef);
+
+    expect(providerCallCount()).toBe(2);
+    expect(mocks.persistReference).toHaveBeenCalledWith(
+      expect.objectContaining({ placeholderRef: imageRef, assetId: 'ast_second_try' }),
+    );
+  });
+
   it('generates when the placeholder has no cached bytes', async () => {
     serveImage();
     mocks.mediaGet.mockResolvedValue(undefined);
 
     await runImageGeneration();
 
+    expect(mocks.mediaGet).toHaveBeenCalledWith(`${stageId}:${imageRef}`);
     expect(providerCallCount()).toBe(1);
   });
 

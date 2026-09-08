@@ -280,9 +280,16 @@ const REFS = [
   'nested/path/file.png',
 ] as const;
 
-/** Whether this matrix ref could ever name a pool asset. */
+/**
+ * Whether this matrix ref could ever name a pool asset.
+ *
+ * The same rule the application applies: every id the pool allocated carries
+ * the `ast_` prefix, so nothing else can be in it. Note that the ref reaching
+ * a lease is not always the matrix ref — a compatibility row's id is split on
+ * `:` — so this is applied to whatever is actually asked for.
+ */
 function leasable(ref: string): boolean {
-  return ref !== 'gen_img_1';
+  return ref.startsWith('ast_');
 }
 
 type TaskCase = { name: string; tasks: Record<string, Record<string, unknown>> };
@@ -406,9 +413,27 @@ interface Outcome {
  * difference in the trace is the lease that no longer happens. It is removed
  * from the frozen side so everything else is still compared exactly.
  */
-function withoutSkippedLease(observed: Outcome, ref: string): Outcome {
-  if (leasable(ref)) return observed;
-  return { ...observed, calls: observed.calls.filter((call) => call !== `lease:${ref}`) };
+const LEASE_CALL = 'lease:';
+
+/**
+ * Drop the lease calls the current implementation is right to skip.
+ *
+ * The frozen implementations ask the pool about every reference; the current
+ * one asks only about references the pool could be holding. Both are answered
+ * the same way (see `arm`), so the outcomes stay comparable — but the frozen
+ * call log carries requests the current one never makes, and comparing those
+ * would only re-assert the skip this normalisation exists to allow.
+ *
+ * Filtered by the reference actually asked for, which is not always the matrix
+ * reference: a compatibility row's id is split on `:` before it is leased.
+ */
+function withoutSkippedLease(observed: Outcome): Outcome {
+  return {
+    ...observed,
+    calls: observed.calls.filter(
+      (call) => !call.startsWith(LEASE_CALL) || leasable(call.slice(LEASE_CALL.length)),
+    ),
+  };
 }
 
 function arm(pool: string, fetchMode: string, tasks: Record<string, unknown>) {
@@ -472,10 +497,7 @@ describe('frozen-base differential harness', () => {
               const label = `ZIP ${ref} ${task.name} pool=${pool} fetch=${fetchMode} row=${row.name}`;
               const supplied = row.make(ref);
               arm(pool, fetchMode, task.tasks);
-              const before = withoutSkippedLease(
-                await capture(() => frozenZip(ref), supplied),
-                ref,
-              );
+              const before = withoutSkippedLease(await capture(() => frozenZip(ref), supplied));
               arm(pool, fetchMode, task.tasks);
               const after = await capture(
                 () =>
@@ -539,7 +561,6 @@ describe('frozen-base differential harness', () => {
                 });
                 const before = withoutSkippedLease(
                   await capture(() => frozenPptx(ref, stageId), loaded),
-                  ref,
                 );
                 arm(pool, fetchMode, task.tasks);
                 mocks.mediaGet.mockImplementation(async (key: string) => {
@@ -571,7 +592,6 @@ describe('frozen-base differential harness', () => {
                   });
                   const repaired = withoutSkippedLease(
                     await capture(() => frozenPptxRepaired(ref, stageId), loaded),
-                    ref,
                   );
                   expect(after, label).toEqual(repaired);
                   expect(after.kind, label).not.toBe('throw');
@@ -611,7 +631,6 @@ describe('frozen-base differential harness', () => {
                 arm(pool, fetchMode, task.tasks);
                 const before = withoutSkippedLease(
                   await capture(() => frozenVideo(ref, supplied, stageId), supplied),
-                  ref,
                 );
                 arm(pool, fetchMode, task.tasks);
                 const after = await capture(

@@ -23,7 +23,14 @@ vi.mock('@/lib/store/settings', () => ({
 
 vi.mock('@/lib/utils/database', () => ({
   mediaFileKey: (stageId: string, ref: string) => `${stageId}:${ref}`,
-  db: { mediaFiles: { put: vi.fn(), delete: mocks.mediaDelete, get: mocks.mediaGet } },
+  db: {
+    mediaFiles: {
+      put: vi.fn(),
+      delete: mocks.mediaDelete,
+      get: mocks.mediaGet,
+      where: () => ({ equals: () => ({ toArray: async () => [] }) }),
+    },
+  },
 }));
 
 import {

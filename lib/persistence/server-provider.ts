@@ -38,6 +38,11 @@ async function createServerPersistenceProvider(
   connectionString: string,
   poolFactory: PersistencePoolFactory,
 ): Promise<ServerPersistenceProvider> {
+  // Resolved before anything is opened: a malformed ceiling is a configuration
+  // mistake, and refusing it here costs no connection and no schema work.
+  // Allocation is reachable by any caller this deployment admits, so the
+  // store's own quota is what keeps it from growing without bound.
+  const quotaBytes = resolveAssetQuotaBytes();
   const pool = poolFactory(connectionString);
   const queryable = pool as unknown as ConnectableQueryable;
   try {
@@ -48,9 +53,6 @@ async function createServerPersistenceProvider(
     await ensureAssetSchema(queryable);
     const withTransaction = nodePostgresTransaction(queryable);
     const byteStore = lazyAssetByteStore(process.env.ASSET_S3_BUCKET, queryable);
-    // Allocation is reachable by any caller this deployment admits, so the
-    // store's own quota is what keeps it from growing without bound.
-    const quotaBytes = resolveAssetQuotaBytes();
     return {
       pool,
       runtimeStore: new PgRuntimeStore(queryable, {

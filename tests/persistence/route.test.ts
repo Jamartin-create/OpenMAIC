@@ -469,6 +469,127 @@ describe('embedded persistence route', () => {
     expect(read.status).toBe(200);
   });
 
+  // The quota is the only thing bounding a shared asset partition, so what a
+  // caller is told when it refuses is part of the contract: a client that
+  // reads "internal error" retries forever and pays a provider each time,
+  // while a client that reads the quota code stops. Driven against the REAL
+  // registry and the REAL handler, because the mapping this pins lives in the
+  // seam between them.
+  it('answers a quota refusal with the contract status and machine-readable code', async () => {
+    const client = {
+      query: async (sql: string) => {
+        // Already past the ceiling configured below.
+        if (sql.includes('SUM(blobs.byte_size)')) {
+          return { rows: [{ logical_bytes: '7589236' }] };
+        }
+        return { rows: [] };
+      },
+      release: vi.fn(),
+    };
+    const pool = {
+      connect: async () => client,
+      query: client.query,
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+
+    vi.doMock('@openmaic/storage/runtime/pg', () => ({
+      ensureSchema: vi.fn().mockResolvedValue(undefined),
+      PgRuntimeStore: class {},
+    }));
+    vi.doMock('@openmaic/storage/document/pg', () => ({
+      ensureDocumentSchema: vi.fn().mockResolvedValue(undefined),
+      PgDocumentStore: class {},
+    }));
+    // The real registry, with only its schema bootstrap stubbed out.
+    vi.doMock('@openmaic/storage/asset/pg', async () => {
+      const actual = await vi.importActual<typeof import('@openmaic/storage/asset/pg')>(
+        '@openmaic/storage/asset/pg',
+      );
+      return { ...actual, ensureAssetSchema: vi.fn().mockResolvedValue(undefined) };
+    });
+    vi.doUnmock('@openmaic/storage/asset/pg-bytes');
+    vi.doUnmock('@openmaic/storage/server/reference');
+    vi.doUnmock('@openmaic/storage/server');
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('PERSISTENCE_ALLOW_INSECURE_DEV_AUTH', '');
+    vi.stubEnv('DATABASE_URL', 'postgres://asset-quota-test');
+    vi.stubEnv('PERSISTENCE_DEV_TOKEN', 'test-token');
+    vi.stubEnv('ASSET_QUOTA_BYTES', '200000');
+    const { handlePersistenceRequest } = await import('@/app/api/persistence/[...path]/route');
+
+    const form = new FormData();
+    form.append('meta', new Blob([JSON.stringify({})], { type: 'application/json' }), 'meta');
+    form.append('bytes', new Blob([new Uint8Array(4096)], { type: 'image/png' }), 'bytes');
+    const response = await handlePersistenceRequest(
+      new Request('http://localhost/api/persistence/assets', { method: 'POST', body: form }),
+      { poolFactory: () => pool as never },
+    );
+
+    expect(response.status).toBe(507);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'ASSET_QUOTA_EXCEEDED' },
+    });
+  });
+
+  // The store and the handler do not always come from the same copy of the
+  // package. This application's persistence provider is reached from the route
+  // bundle and from the instrumentation bundle -- which is why its state is
+  // parked on a `Symbol.for` global -- so the store answering a request may
+  // have been constructed by a different bundle's copy of the storage package.
+  // `instanceof` is false across that boundary while the error's declared code
+  // is still exactly right, and a refusal that degrades to 500 is the one a
+  // client retries forever, paying a provider each time.
+  it('answers a quota refusal raised in another module realm the same way', async () => {
+    class ForeignAssetQuotaExceededError extends Error {
+      readonly code = 'ASSET_QUOTA_EXCEEDED';
+
+      constructor() {
+        super('@openmaic/storage: asset quota exceeded for this principal');
+        this.name = 'AssetQuotaExceededError';
+      }
+    }
+
+    vi.doMock('@openmaic/storage/runtime/pg', () => ({
+      ensureSchema: vi.fn().mockResolvedValue(undefined),
+      PgRuntimeStore: class {},
+    }));
+    vi.doMock('@openmaic/storage/document/pg', () => ({
+      ensureDocumentSchema: vi.fn().mockResolvedValue(undefined),
+      PgDocumentStore: class {},
+    }));
+    vi.doMock('@openmaic/storage/asset/pg', () => ({
+      ensureAssetSchema: vi.fn().mockResolvedValue(undefined),
+      PgAssetStore: class {
+        put(): Promise<never> {
+          return Promise.reject(new ForeignAssetQuotaExceededError());
+        }
+      },
+    }));
+    vi.doMock('@openmaic/storage/asset/pg-bytes', () => ({ PgAssetByteStore: class {} }));
+    vi.doMock('@openmaic/storage/server/reference', () => ({
+      nodePostgresTransaction: vi.fn(() => vi.fn()),
+    }));
+    vi.doUnmock('@openmaic/storage/server');
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('PERSISTENCE_ALLOW_INSECURE_DEV_AUTH', '');
+    vi.stubEnv('DATABASE_URL', 'postgres://asset-quota-foreign-test');
+    vi.stubEnv('PERSISTENCE_DEV_TOKEN', 'test-token');
+    const { handlePersistenceRequest } = await import('@/app/api/persistence/[...path]/route');
+
+    const form = new FormData();
+    form.append('meta', new Blob([JSON.stringify({})], { type: 'application/json' }), 'meta');
+    form.append('bytes', new Blob([new Uint8Array(16)], { type: 'image/png' }), 'bytes');
+    const response = await handlePersistenceRequest(
+      new Request('http://localhost/api/persistence/assets', { method: 'POST', body: form }),
+      { poolFactory: () => ({ end: vi.fn().mockResolvedValue(undefined) }) as never },
+    );
+
+    expect(response.status).toBe(507);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'ASSET_QUOTA_EXCEEDED' },
+    });
+  });
+
   it('mounts an asset store on the document pool and transaction and ensures its schema', async () => {
     const sdkModuleResolved = vi.fn();
     const ensureSchema = vi.fn().mockResolvedValue(undefined);

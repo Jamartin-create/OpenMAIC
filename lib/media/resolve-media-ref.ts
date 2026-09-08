@@ -5,6 +5,7 @@ import { useMayGenerateForStage } from '@/lib/classroom/generation-permission';
 import { useMediaStageId } from '@/lib/contexts/media-stage-context';
 import { useAssetUrlLease, type AssetUrlLeaseState } from './use-asset-url';
 import { isGeneratedMediaPlaceholder } from './media-ref';
+import { isRetryableMediaFailure } from './media-failure';
 import { mayNameAPoolAsset } from './media-placeholder';
 
 export type MediaResolution =
@@ -38,7 +39,7 @@ export function isConcreteMediaAddress(value: string | undefined): boolean {
 }
 
 function isRetryableFailure(task: MediaTaskState): boolean {
-  return task.errorCode !== 'CONTENT_SENSITIVE' && task.errorCode !== 'GENERATION_DISABLED';
+  return isRetryableMediaFailure(task);
 }
 
 /**

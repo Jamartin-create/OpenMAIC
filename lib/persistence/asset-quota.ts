@@ -15,19 +15,30 @@
  */
 const DEFAULT_ASSET_QUOTA_BYTES = 10 * 1024 * 1024 * 1024;
 
+/**
+ * Resolve the configured ceiling, or `undefined` for "no quota".
+ *
+ * Zero means opt out, and it means that however it is spelled: `0`, `00`,
+ * `0.0`, `+0` and `0e0` are one intent, and a deployment that wrote one of the
+ * unusual spellings must not silently get a 10 GiB ceiling instead of the
+ * unbounded store it asked for. So the value is parsed first and compared to
+ * zero afterwards, rather than matched as text.
+ *
+ * Anything that is not a non-negative integer is a configuration mistake, and
+ * this throws rather than falling back. A warning plus a default is the worst
+ * of both: the operator who typed `10GB` gets neither the ceiling they wrote
+ * nor a failure they will notice, and the deployment quietly runs on a limit
+ * nobody chose. Resolution happens during persistence startup, so the throw
+ * surfaces where the misconfiguration can still be fixed.
+ */
 export function resolveAssetQuotaBytes(): number | undefined {
   const raw = process.env.ASSET_QUOTA_BYTES?.trim();
   if (!raw) return DEFAULT_ASSET_QUOTA_BYTES;
-  // An explicit `0` is the documented way to opt out entirely, for a deployment
-  // that bounds its storage somewhere else.
-  if (raw === '0') return undefined;
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    console.warn(
-      `ASSET_QUOTA_BYTES=${raw} is not an integer of at least 0 bytes; ` +
-        `using ${DEFAULT_ASSET_QUOTA_BYTES}`,
+    throw new Error(
+      `ASSET_QUOTA_BYTES must be a non-negative integer number of bytes, or 0 to opt out of the quota entirely; received ${JSON.stringify(raw)}.`,
     );
-    return DEFAULT_ASSET_QUOTA_BYTES;
   }
-  return parsed;
+  return parsed === 0 ? undefined : parsed;
 }
